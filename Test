@@ -1,0 +1,67 @@
+if getgenv().Key == "ThisIsLostHub" then
+    print("[LostHub] Key correct, script loading!")
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    local RunService = game:GetService("RunService")
+
+    local function getSeat()
+        local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+        local humanoid = char:FindFirstChildWhichIsA("Humanoid")
+        if humanoid and humanoid.SeatPart and humanoid.SeatPart:IsA("VehicleSeat") then
+            return humanoid.SeatPart
+        end
+    end
+
+    local seat = getSeat()
+    if not seat then
+        warn("Kein VehicleSeat gefunden!")
+        return
+    end
+
+    local vehicle = seat.Parent
+    if not vehicle or not vehicle.PrimaryPart then
+        warn("Kein Auto gefunden!")
+        return
+    end
+
+    print("Auto gefunden!")
+
+    -- BodyVelocity für Vorwärtsbewegung
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e5,1e5,1e5)
+    bv.Velocity = Vector3.new(0,0,0)
+    bv.Parent = vehicle.PrimaryPart
+
+    -- BodyForce für Downforce
+    local bf = Instance.new("BodyForce")
+    bf.Force = Vector3.new(0,0,0)
+    bf.Parent = vehicle.PrimaryPart
+
+    -- Settings
+    getgenv().targetSpeed = getgenv().targetSpeed or 40
+    getgenv().accel = getgenv().accel or 2
+    getgenv().downforce = getgenv().downforce or 500  
+
+    RunService.Heartbeat:Connect(function(delta)
+        if not vehicle or not vehicle.PrimaryPart then return end
+        local direction = vehicle.PrimaryPart.CFrame.LookVector
+        local currentVel = vehicle.PrimaryPart.Velocity.Magnitude
+
+        if seat.Throttle ~= 0 then
+            -- Gas geben: Geschwindigkeit anpassen
+            if currentVel < getgenv().targetSpeed then
+                bv.Velocity = direction * math.min(currentVel + getgenv().accel, getgenv().targetSpeed)
+            else
+                bv.Velocity = vehicle.PrimaryPart.Velocity
+            end
+        else
+            -- Kein Gas -> anhalten
+            bv.Velocity = Vector3.new(0, vehicle.PrimaryPart.Velocity.Y, 0)
+        end
+
+        -- Downforce
+        bf.Force = Vector3.new(0, -getgenv().downforce, 0)
+    end)
+else
+    warn("[LostHub] Wrong Key, Find key in discord!")
+end
