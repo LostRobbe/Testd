@@ -1,65 +1,105 @@
+-- Beispiel: Only-drive-on-player-input
 if getgenv().Key == "ThisIsLostHub" then
-    print("[LostHub] Key correct, script loading!")
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
     local RunService = game:GetService("RunService")
+    local UserInputService = game:GetService("UserInputService")
+
+    -- Input-Flag (W / Pfeil Hoch)
+    local accelPressed = false
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        local k = input.KeyCode
+        if k == Enum.KeyCode.W or k == Enum.KeyCode.Up then
+            accelPressed = true
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        local k = input.KeyCode
+        if k == Enum.KeyCode.W or k == Enum.KeyCode.Up then
+            accelPressed = false
+        end
+    end)
 
     local function getSeat()
-        local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+        local char = LocalPlayer.Character
+        if not char then return nil end
         local humanoid = char:FindFirstChildWhichIsA("Humanoid")
-        if humanoid and humanoid.SeatPart and humanoid.SeatPart:IsA("VehicleSeat") then
-            return humanoid.SeatPart
+        if humanoid then
+            local seat = humanoid.SeatPart
+            if seat and seat:IsA("VehicleSeat") then return seat end
         end
+        return nil
     end
 
-    local seat = getSeat()
-    if not seat then
-        warn("Kein VehicleSeat gefunden!")
-        return
-    end
-
-    local vehicle = seat.Parent
-    if not vehicle or not vehicle.PrimaryPart then
-        warn("Kein Auto gefunden!")
-        return
-    end
-
-    print("Auto gefunden!")
-
-    -- BodyVelocity für Vorwärtsbewegung
+    -- Body objects (erstmal unparented)
     local bv = Instance.new("BodyVelocity")
-    bv.MaxForce = Vector3.new(1e5,0,1e5)
+    bv.MaxForce = Vector3.new(1e5,1e5,1e5)
     bv.Velocity = Vector3.new(0,0,0)
-    bv.Parent = vehicle.PrimaryPart
 
-    -- BodyForce für Downforce
     local bf = Instance.new("BodyForce")
     bf.Force = Vector3.new(0,0,0)
-    bf.Parent = vehicle.PrimaryPart
 
-    -- Settings
-    getgenv().targetSpeed = getgenv().targetSpeed or 40
-    getgenv().accel = getgenv().accel or 2
-    getgenv().downforce = getgenv().downforce or 0  
+    -- konfigurierbare Werte
+    getgenv().targetSpeed = getgenv().targetSpeed or 10       -- Zielgeschwindigkeit (studs/s)
+    getgenv().accel = getgenv().accel or 50                  -- Beschleunigung (höher = schneller zunehmen)
+    getgenv().downforce = getgenv().downforce or 500         -- Downforce
 
     RunService.Heartbeat:Connect(function(delta)
-        if not vehicle or not vehicle.PrimaryPart then return end
-        local direction = vehicle.PrimaryPart.CFrame.LookVector
-        local currentVel = vehicle.PrimaryPart.Velocity.Magnitude
+        local seat = getSeat()
+        local vehicle = seat and seat.Parent
+        local primary = vehicle and vehicle.PrimaryPart
 
-        if seat.Throttle ~= 0 then
-            -- Gas geben: Geschwindigkeit anpassen
-            if currentVel < getgenv().targetSpeed then
-                bv.Velocity = direction * math.min(currentVel + getgenv().accel, getgenv().targetSpeed)
-            else
-                bv.Velocity = vehicle.PrimaryPart.Velocity
-            end
-        else
-            -- Kein Gas -> anhalten
-            bv.Velocity = Vector3.new(0, vehicle.PrimaryPart.Velocity.Y, 0)
+        -- wenn kein Fahrzeug, Kräfte loswerden
+        if not primary then
+            if bv.Parent then bv.Parent = nil end
+            if bf.Parent then bf.Parent = nil end
+            return
         end
 
-        -- Downforce
+        -- wenn Fahrzeug vorhanden, parenten (falls noch nicht)
+        if bv.Parent ~= primary then
+            bv.Parent = primary
+            bf.Parent = primary
+        end
+
+        -- Vorwärtskomponente der aktuellen Geschwindigkeit (nur in Blickrichtung)
+        local direction = primary.CFrame.LookVector
+        local forwardSpeed = primary.Velocity:Dot(direction)
+        if forwardSpeed < 0 then forwardSpeed = 0 end
+
+        -- Ermitteln, ob der Spieler wirklich Gas geben will
+        local shouldDrive = false
+        local throttleValue = 0
+
+        -- 1) VehicleSeat.Throttle (wenn vorhanden und != 0)
+        if seat and seat:IsA("VehicleSeat") then
+            if seat.Throttle and seat.Throttle ~= 0 then
+                shouldDrive = true
+                throttleValue = math.clamp(seat.Throttle, -1, 1)
+            end
+        end
+
+        -- 2) Fallback: lokale Tasteneingabe (W/Up)
+        if not shouldDrive and accelPressed and seat then
+            shouldDrive = true
+            throttleValue = 1
+        end
+
+        -- Anwenden: nur vorwärts (throttleValue > 0)
+        if shouldDrive and throttleValue > 0 then
+            local desired = getgenv().targetSpeed * throttleValue
+            local accel = getgenv().accel
+            -- delta-basierte Beschleunigung (frame-unabhängig)
+            local newSpeed = math.min(forwardSpeed + accel * delta, desired)
+            bv.Velocity = direction * newSpeed
+        else
+            -- kein Gas -> keine Vorwärtskraft mehr (Y-Geschwindigkeit beibehalten)
+            local vel = primary.Velocity
+            bv.Velocity = Vector3.new(0, vel.Y, 0)
+        end
+
+        -- Downforce konstant anwenden
         bf.Force = Vector3.new(0, -getgenv().downforce, 0)
     end)
 else
