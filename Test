@@ -28,7 +28,7 @@ if getgenv().Key == "ThisIsLostHub" then
 
     -- BodyVelocity für Vorwärtsbewegung
     local bv = Instance.new("BodyVelocity")
-    bv.MaxForce = Vector3.new(1e5,1e5,1e5)
+    bv.MaxForce = Vector3.new(1e5,0,1e5)
     bv.Velocity = Vector3.new(0,0,0)
     bv.Parent = vehicle.PrimaryPart
 
@@ -40,7 +40,7 @@ if getgenv().Key == "ThisIsLostHub" then
     -- Settings
     getgenv().targetSpeed = getgenv().targetSpeed or 40
     getgenv().accel = getgenv().accel or 2
-    getgenv().downforce = getgenv().downforce or 500  
+    getgenv().downforce = getgenv().downforce or 0  
 
     RunService.Heartbeat:Connect(function(delta)
         if not vehicle or not vehicle.PrimaryPart then return end
