@@ -1,194 +1,223 @@
--- Aggressives Anti-AutoDrive + Debug (bereinigt)
-if getgenv().Key == "ThisIsLostHub" then
-    local Players = game:GetService("Players")
-    local LocalPlayer = Players.LocalPlayer
-    local RunService = game:GetService("RunService")
-    local UserInputService = game:GetService("UserInputService")
+-- FullMovementForensics.lua
+-- Ziel: alles loggen, keine Konfiguration notwendig
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-    -- Debug-Flag (setze true für Konsolen-Output, vor dem Laden)
-    getgenv().DriveDebug = getgenv().DriveDebug or true
+local LocalPlayer = Players.LocalPlayer
 
-    -- Input flag
-    local accelPressed = false
-    UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
+-- Konfiguration intern
+local LOOKBACK_MS = 300
+local POLL_INTERVAL = 0.06
+local ASSEMBLY_THRESHOLD = 0.01
+local CFRAMESNAP_THRESHOLD = 0.03
+local DETAILED_STACK = true
+
+-- Hilfsfunktionen
+local function nowStr() return os.date("%H:%M:%S") end
+local function ts() return tick()*1000 end
+local function prettyVec(v) if not v then return "nil" end; return ("(%.3f, %.3f, %.3f)"):format(v.X, v.Y, v.Z) end
+local function log(...) print(("[%s][MF] %s"):format(nowStr(), table.concat({...}, " "))) end
+
+-- Track letzte Aktionen
+local lastInput = {when=0, kind=nil, detail=nil}
+local lastGuiClick = {when=0, kind=nil, detail=nil}
+local lastRemoteEvent = {when=0, name=nil, parent=nil, args=nil, traceback=nil}
+
+-- Movement tracking
+local trackedPrimary = nil
+local lastAV = Vector3.new(0,0,0)
+local lastVel = Vector3.new(0,0,0)
+local lastCFrame = nil
+local lastSampleTime = 0
+
+-- Tastatureingaben tracken
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.UserInputType == Enum.UserInputType.Keyboard then
         local k = input.KeyCode
-        if k == Enum.KeyCode.W or k == Enum.KeyCode.Up then
-            accelPressed = true
+        if k == Enum.KeyCode.W or k == Enum.KeyCode.S or k == Enum.KeyCode.A or k == Enum.KeyCode.D
+           or k == Enum.KeyCode.Up or k == Enum.KeyCode.Down or k == Enum.KeyCode.Left or k == Enum.KeyCode.Right then
+            lastInput.when = ts()
+            lastInput.kind = "Key"
+            lastInput.detail = tostring(k)
+            log("Input detected:", lastInput.kind, lastInput.detail, "ts=" .. math.floor(lastInput.when))
+        end
+    end
+end)
+
+-- GUI-Button clicks tracken
+local function monitorGuiForClicks(guiParent)
+    if not guiParent then return end
+    local function attachToButton(btn)
+        if not btn or not btn:IsA then return end
+        if btn:GetAttribute("MF_Monitored") then return end
+        btn:SetAttribute("MF_Monitored", true)
+        pcall(function()
+            btn.MouseButton1Click:Connect(function()
+                lastGuiClick.when = ts()
+                lastGuiClick.kind = "MouseButton1Click"
+                lastGuiClick.detail = btn:GetFullName()
+                log("GUI click:", lastGuiClick.detail, lastGuiClick.when)
+            end)
+        end)
+        pcall(function()
+            btn.Activated:Connect(function()
+                lastGuiClick.when = ts()
+                lastGuiClick.kind = "Activated"
+                lastGuiClick.detail = btn:GetFullName()
+                log("GUI activated:", lastGuiClick.detail, lastGuiClick.when)
+            end)
+        end)
+    end
+    for _, v in ipairs(guiParent:GetDescendants()) do
+        if v:IsA("TextButton") or v:IsA("ImageButton") then
+            attachToButton(v)
+        end
+    end
+    guiParent.DescendantAdded:Connect(function(inst)
+        if inst:IsA("TextButton") or inst:IsA("ImageButton") then
+            task.wait(0.02)
+            attachToButton(inst)
+            log("New GUI button discovered:", inst:GetFullName())
         end
     end)
-    UserInputService.InputEnded:Connect(function(input)
-        local k = input.KeyCode
-        if k == Enum.KeyCode.W or k == Enum.KeyCode.Up then
-            accelPressed = false
+end
+
+local function setupPlayerGuiWatcher()
+    if LocalPlayer:FindFirstChild("PlayerGui") then
+        monitorGuiForClicks(LocalPlayer.PlayerGui)
+    end
+    LocalPlayer.ChildAdded:Connect(function(child)
+        if child.Name == "PlayerGui" then
+            monitorGuiForClicks(child)
         end
     end)
+end
+setupPlayerGuiWatcher()
 
-    -- helper: get current VehicleSeat if sitzt
-    local function getSeat()
-        local char = LocalPlayer.Character
-        if not char then return nil end
-        local humanoid = char:FindFirstChildWhichIsA("Humanoid")
-        if humanoid then
-            local seat = humanoid.SeatPart
-            if seat and seat:IsA("VehicleSeat") then return seat end
+-- RemoteEvents tracken
+local remoteListeners = {}
+local function attachToRemoteEvent(ev)
+    if not ev or ev.ClassName ~= "RemoteEvent" then return end
+    if remoteListeners[ev] then return end
+    remoteListeners[ev] = true
+    pcall(function()
+        ev.OnClientEvent:Connect(function(...)
+            local a = {...}
+            lastRemoteEvent.when = ts()
+            lastRemoteEvent.name = ev.Name
+            lastRemoteEvent.parent = ev.Parent and ev.Parent:GetFullName() or "nil"
+            lastRemoteEvent.args = a
+            local ok, tb = pcall(function() return debug and debug.traceback and debug.traceback() or nil end)
+            lastRemoteEvent.traceback = ok and tb or nil
+            log("RemoteEvent received:", ev:GetFullName(), "argsCount=" .. #a, "ts=" .. math.floor(lastRemoteEvent.when))
+            if lastRemoteEvent.traceback then
+                log("Traceback (truncated):", string.sub(lastRemoteEvent.traceback,1,400))
+            end
+        end)
+    end)
+end
+
+local function scanAndAttachRemotes(container)
+    if not container then return end
+    for _, inst in ipairs(container:GetDescendants()) do
+        if inst.ClassName == "RemoteEvent" then
+            attachToRemoteEvent(inst)
         end
-        return nil
+    end
+    container.DescendantAdded:Connect(function(inst)
+        if inst.ClassName == "RemoteEvent" then
+            attachToRemoteEvent(inst)
+            log("New RemoteEvent discovered:", inst:GetFullName())
+        end
+    end)
+end
+
+scanAndAttachRemotes(ReplicatedStorage)
+scanAndAttachRemotes(Workspace)
+scanAndAttachRemotes(Players)
+
+-- Primär-Teil des Fahrzeugs tracken
+local function getPrimary()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local humanoid = char:FindFirstChildWhichIsA("Humanoid")
+    if not humanoid then return nil end
+    local seat = humanoid.SeatPart
+    if not (seat and seat:IsA("VehicleSeat")) then return nil end
+    local vehicle = seat.Parent
+    if not vehicle then return nil end
+    return vehicle.PrimaryPart, vehicle
+end
+
+RunService.Heartbeat:Connect(function(delta)
+    if tick()*1000 - lastSampleTime < POLL_INTERVAL*1000 then return end
+    lastSampleTime = tick()*1000
+
+    local primary, vehicle = getPrimary()
+    if not primary then
+        trackedPrimary = nil
+        return
     end
 
-    -- unsere BodyInstances (eigenes BV behalten)
-    local myBV = Instance.new("BodyVelocity")
-    myBV.Name = "LostHub_BodyVelocity"
-    myBV.MaxForce = Vector3.new(0,0,0)
-    myBV.Velocity = Vector3.new(0,0,0)
+    if trackedPrimary ~= primary then
+        trackedPrimary = primary
+        lastAV = primary.AssemblyLinearVelocity or Vector3.new(0,0,0)
+        lastVel = primary.Velocity or Vector3.new(0,0,0)
+        lastCFrame = primary.CFrame
+        log("Started movement forensics on", primary:GetFullName())
+    end
 
-    local myBF = Instance.new("BodyForce")
-    myBF.Name = "LostHub_BodyForce"
-    myBF.Force = Vector3.new(0,0,0)
+    local av = primary.AssemblyLinearVelocity or Vector3.new(0,0,0)
+    local vel = primary.Velocity or Vector3.new(0,0,0)
+    local cf = primary.CFrame
 
-    -- Einstellungen
-    getgenv().targetSpeed = getgenv().targetSpeed or 40  -- studs/s
-    getgenv().accel = getgenv().accel or 100            -- Beschleunigung (höher = schneller auf Ziel)
-    getgenv().downforce = getgenv().downforce or 500
-    getgenv().DriveDebugInterval = getgenv().DriveDebugInterval or 1 -- Sekunden
+    local dx = math.abs(av.X - lastAV.X)
+    local dz = math.abs(av.Z - lastAV.Z)
+    local avChanged = dx > ASSEMBLY_THRESHOLD or dz > ASSEMBLY_THRESHOLD
+    local posDelta = (cf.Position - lastCFrame.Position).Magnitude
+    local cframeJump = posDelta > CFRAMESNAP_THRESHOLD
 
-    -- Debug-Timer
-    local debugTimer = 0
+    if avChanged or cframeJump then
+        local now_ms = ts()
+        log("MOVEMENT EVENT detected on", primary:GetFullName(), "| avDelta=(%.3f,%.3f) posDelta=%.3f"
+            :format(dx, dz, posDelta))
 
-    RunService.Heartbeat:Connect(function(delta)
-        local seat = getSeat()
-        local vehicle = seat and seat.Parent
-        local primary = vehicle and vehicle.PrimaryPart
-
-        -- Wenn kein Fahrzeug/PrimaryPart -> sicherstellen, dass unsere Instanzen nicht parented sind
-        if not primary then
-            if myBV.Parent then myBV.Parent = nil end
-            if myBF.Parent then myBF.Parent = nil end
-            return
+        local function occurredWithin(rec)
+            if not rec or not rec.when then return false end
+            return (now_ms - rec.when) <= LOOKBACK_MS
         end
 
-        -- parenten, falls noch nicht
-        if myBV.Parent ~= primary then
-            myBV.Parent = primary
-            myBF.Parent = primary
-        end
+        local candidates = {}
+        if occurredWithin(lastInput) then table.insert(candidates,{type="Keyboard", detail=lastInput.detail, age=now_ms-lastInput.when}) end
+        if occurredWithin(lastGuiClick) then table.insert(candidates,{type="GUI", detail=lastGuiClick.detail, age=now_ms-lastGuiClick.when}) end
+        if occurredWithin(lastRemoteEvent) then table.insert(candidates,{type="RemoteEvent", detail=(lastRemoteEvent.name or "nil").."@"..tostring(lastRemoteEvent.parent), age=now_ms-lastRemoteEvent.when}) end
 
-        local direction = primary.CFrame.LookVector
-        local forwardSpeed = math.max(0, primary.Velocity:Dot(direction))
-
-        -- Entscheiden, ob wir fahren sollen
-        local shouldDrive = false
-        local throttleValue = 0
-
-        -- 1) VehicleSeat.Throttle prüfen
-        if seat and seat:IsA("VehicleSeat") and seat.Throttle and seat.Throttle ~= 0 then
-            shouldDrive = true
-            throttleValue = math.clamp(seat.Throttle, -1, 1)
-        end
-
-        -- 2) Fallback lokaler Tastendruck (nur sinnvoll, wenn Spieler im Sitz ist)
-        if not shouldDrive and accelPressed and seat then
-            shouldDrive = true
-            throttleValue = 1
-        end
-
-        -- Wenn wir fahren wollen und nur vorwärts (throttle > 0)
-        if shouldDrive and throttleValue > 0 then
-            -- aktivieren: starke MaxForce und gewünschte Geschwindigkeit setzen
-            myBV.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-            local desired = getgenv().targetSpeed * throttleValue
-            local newSpeed = math.min(forwardSpeed + getgenv().accel * delta, desired)
-            myBV.Velocity = direction * newSpeed
+        local verdict = "unklar"
+        if #candidates == 1 then
+            verdict = "vermutlich: "..candidates[1].type.." (age="..math.floor(candidates[1].age).."ms)"
+        elseif #candidates > 1 then
+            table.sort(candidates,function(a,b) return a.age<b.age end)
+            verdict = "mehrere Kandidaten, wahrscheinlich: "..candidates[1].type.." (age="..math.floor(candidates[1].age).."ms)"
         else
-            -- KEIN GAS: deaktivieren wir unsere BV-Kraft und entfernen fremde BVs
-            myBV.MaxForce = Vector3.new(0, 0, 0)
-            myBV.Velocity = Vector3.new(0, primary.Velocity.Y, 0)
-            -- Entferne alle Fremd-BodyVelocity auf der PrimaryPart (außer unser myBV)
-            for _, inst in ipairs(primary:GetDescendants()) do
-                if inst:IsA("BodyVelocity") and inst ~= myBV then
-                    pcall(function()
-                        inst:Destroy()
-                    end)
-                end
-            end
-            -- zusätzlich AssemblyLinearVelocity X/Z auf 0 setzen (manchmal nötig)
-            local av = primary.AssemblyLinearVelocity
-            if av then
-                primary.AssemblyLinearVelocity = Vector3.new(0, av.Y, 0)
+            verdict = "keine unmittelbare Aktion in letzten "..LOOKBACK_MS.."ms"
+        end
+        log("FORENSICS:", verdict)
+
+        if occurredWithin(lastRemoteEvent) then
+            log("RemoteEvent detail:", lastRemoteEvent.name, "parent=", lastRemoteEvent.parent, "argsCount="..(#(lastRemoteEvent.args) or 0))
+            if lastRemoteEvent.traceback then
+                log("RemoteEvent traceback (truncated):", string.sub(lastRemoteEvent.traceback,1,400))
             end
         end
+        if occurredWithin(lastGuiClick) then log("GUI click detail:", lastGuiClick.detail) end
+        if occurredWithin(lastInput) then log("Keyboard detail:", lastInput.detail) end
+    end
 
-        -- Downforce konstant anwenden (unabhängig vom Fahren)
-        myBF.Force = Vector3.new(0, -getgenv().downforce, 0)
-
-        -- Debug-Logging alle X Sekunden (nicht spammy)
-        if getgenv().DriveDebug then
-            debugTimer = debugTimer + delta
-            if debugTimer >= getgenv().DriveDebugInterval then
-                debugTimer = 0
-                -- Zähle noch vorhandene BodyVelocity (inkl. unserers)
-                local bvCount = 0
-                for _, inst in ipairs(primary:GetDescendants()) do
-                    if inst:IsA("BodyVelocity") then bvCount = bvCount + 1 end
-                end
-                print(string.format(
-                    "[LostHub DEBUG] Throttle=%s | accelPressed=%s | forwardSpeed=%.2f | BVcount=%d | myBVParent=%s",
-                    tostring((seat and seat.Throttle) or "nil"),
-                    tostring(accelPressed),
-                    forwardSpeed,
-                    bvCount,
-                    tostring((myBV.Parent and myBV.Parent:GetFullName()) or "nil")
-                ))
-            end
-        end
-    end)
-else
-    warn("[LostHub] Wrong Key, Find key in discord!")
-end            myBV.MaxForce = Vector3.new(0, 0, 0)
-            myBV.Velocity = Vector3.new(0, primary.Velocity.Y, 0)
-            -- Entferne alle Fremd-BodyVelocity auf der PrimaryPart (außer unser myBV)
-            for _, inst in ipairs(primary:GetDescendants()) do
-                if inst:IsA("BodyVelocity") and inst ~= myBV then
-                    -- Versuch, so vorsichtig wie möglich zu entfernen
-                    pcall(function()
-                        inst:Destroy()
-                    end)
-                end
-            end
-            -- zusätzlich AssemblyLinearVelocity X/Z auf 0 setzen (manchmal nötig)
-            local av = primary.AssemblyLinearVelocity
-            if av then
-                primary.AssemblyLinearVelocity = Vector3.new(0, av.Y, 0)
-            end
-        end
-
-        -- Downforce konstant anwenden (unabhängig vom Fahren)
-        myBF.Force = Vector3.new(0, -getgenv().downforce, 0)
-
-        -- Debug-Logging alle X Sekunden (nicht spammy)
-        if getgenv().DriveDebug then
-            debugTimer = debugTimer + delta
-            if debugTimer >= getgenv().DriveDebugInterval then
-                debugTimer = 0
-                -- Zähle noch vorhandene BodyVelocity (inkl. unserers)
-                local bvCount = 0
-                for _, inst in ipairs(primary:GetDescendants()) do
-                    if inst:IsA("BodyVelocity") then bvCount = bvCount + 1 end
-                end
-                print(string.format(
-                    "[LostHub DEBUG] Throttle=%s | accelPressed=%s | forwardSpeed=%.2f | BVcount=%d | myBVParent=%s",
-                    tostring(seat and seat.Throttle or "nil"),
-                    tostring(accelPressed),
-                    forwardSpeed,
-                    bvCount,
-                    tostring(myBV.Parent and myBV.Parent:GetFullName() or "nil")
-                ))
-            end
-        end
-    end)
-else
-    warn("[LostHub] Wrong Key, Find key in discord!")
-end    end)
-else
-    warn("[LostHub] Wrong Key, Find key in discord!")
-end
+    lastAV = av
+    lastVel = vel
+    lastCFrame = cf
+end)
