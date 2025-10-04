@@ -1,12 +1,12 @@
--- Aggressives Anti-AutoDrive + Debug
+-- Aggressives Anti-AutoDrive + Debug (bereinigt)
 if getgenv().Key == "ThisIsLostHub" then
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
     local RunService = game:GetService("RunService")
     local UserInputService = game:GetService("UserInputService")
 
-    -- Debug-Flag (setze true für Konsolen-Output)
-    getgenv().DriveDebug = getgenv().DriveDebug or false
+    -- Debug-Flag (setze true für Konsolen-Output, vor dem Laden)
+    getgenv().DriveDebug = getgenv().DriveDebug or true
 
     -- Input flag
     local accelPressed = false
@@ -102,6 +102,49 @@ if getgenv().Key == "ThisIsLostHub" then
         else
             -- KEIN GAS: deaktivieren wir unsere BV-Kraft und entfernen fremde BVs
             myBV.MaxForce = Vector3.new(0, 0, 0)
+            myBV.Velocity = Vector3.new(0, primary.Velocity.Y, 0)
+            -- Entferne alle Fremd-BodyVelocity auf der PrimaryPart (außer unser myBV)
+            for _, inst in ipairs(primary:GetDescendants()) do
+                if inst:IsA("BodyVelocity") and inst ~= myBV then
+                    pcall(function()
+                        inst:Destroy()
+                    end)
+                end
+            end
+            -- zusätzlich AssemblyLinearVelocity X/Z auf 0 setzen (manchmal nötig)
+            local av = primary.AssemblyLinearVelocity
+            if av then
+                primary.AssemblyLinearVelocity = Vector3.new(0, av.Y, 0)
+            end
+        end
+
+        -- Downforce konstant anwenden (unabhängig vom Fahren)
+        myBF.Force = Vector3.new(0, -getgenv().downforce, 0)
+
+        -- Debug-Logging alle X Sekunden (nicht spammy)
+        if getgenv().DriveDebug then
+            debugTimer = debugTimer + delta
+            if debugTimer >= getgenv().DriveDebugInterval then
+                debugTimer = 0
+                -- Zähle noch vorhandene BodyVelocity (inkl. unserers)
+                local bvCount = 0
+                for _, inst in ipairs(primary:GetDescendants()) do
+                    if inst:IsA("BodyVelocity") then bvCount = bvCount + 1 end
+                end
+                print(string.format(
+                    "[LostHub DEBUG] Throttle=%s | accelPressed=%s | forwardSpeed=%.2f | BVcount=%d | myBVParent=%s",
+                    tostring((seat and seat.Throttle) or "nil"),
+                    tostring(accelPressed),
+                    forwardSpeed,
+                    bvCount,
+                    tostring((myBV.Parent and myBV.Parent:GetFullName()) or "nil")
+                ))
+            end
+        end
+    end)
+else
+    warn("[LostHub] Wrong Key, Find key in discord!")
+end            myBV.MaxForce = Vector3.new(0, 0, 0)
             myBV.Velocity = Vector3.new(0, primary.Velocity.Y, 0)
             -- Entferne alle Fremd-BodyVelocity auf der PrimaryPart (außer unser myBV)
             for _, inst in ipairs(primary:GetDescendants()) do
