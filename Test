@@ -1,11 +1,14 @@
--- Beispiel: Only-drive-on-player-input
+-- Aggressives Anti-AutoDrive + Debug
 if getgenv().Key == "ThisIsLostHub" then
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
     local RunService = game:GetService("RunService")
     local UserInputService = game:GetService("UserInputService")
 
-    -- Input-Flag (W / Pfeil Hoch)
+    -- Debug-Flag (setze true für Konsolen-Output)
+    getgenv().DriveDebug = getgenv().DriveDebug or false
+
+    -- Input flag
     local accelPressed = false
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed then return end
@@ -21,6 +24,7 @@ if getgenv().Key == "ThisIsLostHub" then
         end
     end)
 
+    -- helper: get current VehicleSeat if sitzt
     local function getSeat()
         local char = LocalPlayer.Character
         if not char then return nil end
@@ -32,76 +36,116 @@ if getgenv().Key == "ThisIsLostHub" then
         return nil
     end
 
-    -- Body objects (erstmal unparented)
-    local bv = Instance.new("BodyVelocity")
-    bv.MaxForce = Vector3.new(1e5,1e5,1e5)
-    bv.Velocity = Vector3.new(0,0,0)
+    -- unsere BodyInstances (eigenes BV behalten)
+    local myBV = Instance.new("BodyVelocity")
+    myBV.Name = "LostHub_BodyVelocity"
+    myBV.MaxForce = Vector3.new(0,0,0)
+    myBV.Velocity = Vector3.new(0,0,0)
 
-    local bf = Instance.new("BodyForce")
-    bf.Force = Vector3.new(0,0,0)
+    local myBF = Instance.new("BodyForce")
+    myBF.Name = "LostHub_BodyForce"
+    myBF.Force = Vector3.new(0,0,0)
 
-    -- konfigurierbare Werte
-    getgenv().targetSpeed = getgenv().targetSpeed or 10       -- Zielgeschwindigkeit (studs/s)
-    getgenv().accel = getgenv().accel or 50                  -- Beschleunigung (höher = schneller zunehmen)
-    getgenv().downforce = getgenv().downforce or 500         -- Downforce
+    -- Einstellungen
+    getgenv().targetSpeed = getgenv().targetSpeed or 40  -- studs/s
+    getgenv().accel = getgenv().accel or 100            -- Beschleunigung (höher = schneller auf Ziel)
+    getgenv().downforce = getgenv().downforce or 500
+    getgenv().DriveDebugInterval = getgenv().DriveDebugInterval or 1 -- Sekunden
+
+    -- Debug-Timer
+    local debugTimer = 0
 
     RunService.Heartbeat:Connect(function(delta)
         local seat = getSeat()
         local vehicle = seat and seat.Parent
         local primary = vehicle and vehicle.PrimaryPart
 
-        -- wenn kein Fahrzeug, Kräfte loswerden
+        -- Wenn kein Fahrzeug/PrimaryPart -> sicherstellen, dass unsere Instanzen nicht parented sind
         if not primary then
-            if bv.Parent then bv.Parent = nil end
-            if bf.Parent then bf.Parent = nil end
+            if myBV.Parent then myBV.Parent = nil end
+            if myBF.Parent then myBF.Parent = nil end
             return
         end
 
-        -- wenn Fahrzeug vorhanden, parenten (falls noch nicht)
-        if bv.Parent ~= primary then
-            bv.Parent = primary
-            bf.Parent = primary
+        -- parenten, falls noch nicht
+        if myBV.Parent ~= primary then
+            myBV.Parent = primary
+            myBF.Parent = primary
         end
 
-        -- Vorwärtskomponente der aktuellen Geschwindigkeit (nur in Blickrichtung)
         local direction = primary.CFrame.LookVector
-        local forwardSpeed = primary.Velocity:Dot(direction)
-        if forwardSpeed < 0 then forwardSpeed = 0 end
+        local forwardSpeed = math.max(0, primary.Velocity:Dot(direction))
 
-        -- Ermitteln, ob der Spieler wirklich Gas geben will
+        -- Entscheiden, ob wir fahren sollen
         local shouldDrive = false
         local throttleValue = 0
 
-        -- 1) VehicleSeat.Throttle (wenn vorhanden und != 0)
-        if seat and seat:IsA("VehicleSeat") then
-            if seat.Throttle and seat.Throttle ~= 0 then
-                shouldDrive = true
-                throttleValue = math.clamp(seat.Throttle, -1, 1)
-            end
+        -- 1) VehicleSeat.Throttle prüfen
+        if seat and seat:IsA("VehicleSeat") and seat.Throttle and seat.Throttle ~= 0 then
+            shouldDrive = true
+            throttleValue = math.clamp(seat.Throttle, -1, 1)
         end
 
-        -- 2) Fallback: lokale Tasteneingabe (W/Up)
+        -- 2) Fallback lokaler Tastendruck (nur sinnvoll, wenn Spieler im Sitz ist)
         if not shouldDrive and accelPressed and seat then
             shouldDrive = true
             throttleValue = 1
         end
 
-        -- Anwenden: nur vorwärts (throttleValue > 0)
+        -- Wenn wir fahren wollen und nur vorwärts (throttle > 0)
         if shouldDrive and throttleValue > 0 then
+            -- aktivieren: starke MaxForce und gewünschte Geschwindigkeit setzen
+            myBV.MaxForce = Vector3.new(1e5, 1e5, 1e5)
             local desired = getgenv().targetSpeed * throttleValue
-            local accel = getgenv().accel
-            -- delta-basierte Beschleunigung (frame-unabhängig)
-            local newSpeed = math.min(forwardSpeed + accel * delta, desired)
-            bv.Velocity = direction * newSpeed
+            local newSpeed = math.min(forwardSpeed + getgenv().accel * delta, desired)
+            myBV.Velocity = direction * newSpeed
         else
-            -- kein Gas -> keine Vorwärtskraft mehr (Y-Geschwindigkeit beibehalten)
-            local vel = primary.Velocity
-            bv.Velocity = Vector3.new(0, vel.Y, 0)
+            -- KEIN GAS: deaktivieren wir unsere BV-Kraft und entfernen fremde BVs
+            myBV.MaxForce = Vector3.new(0, 0, 0)
+            myBV.Velocity = Vector3.new(0, primary.Velocity.Y, 0)
+            -- Entferne alle Fremd-BodyVelocity auf der PrimaryPart (außer unser myBV)
+            for _, inst in ipairs(primary:GetDescendants()) do
+                if inst:IsA("BodyVelocity") and inst ~= myBV then
+                    -- Versuch, so vorsichtig wie möglich zu entfernen
+                    pcall(function()
+                        inst:Destroy()
+                    end)
+                end
+            end
+            -- zusätzlich AssemblyLinearVelocity X/Z auf 0 setzen (manchmal nötig)
+            local av = primary.AssemblyLinearVelocity
+            if av then
+                primary.AssemblyLinearVelocity = Vector3.new(0, av.Y, 0)
+            end
         end
 
-        -- Downforce konstant anwenden
-        bf.Force = Vector3.new(0, -getgenv().downforce, 0)
+        -- Downforce konstant anwenden (unabhängig vom Fahren)
+        myBF.Force = Vector3.new(0, -getgenv().downforce, 0)
+
+        -- Debug-Logging alle X Sekunden (nicht spammy)
+        if getgenv().DriveDebug then
+            debugTimer = debugTimer + delta
+            if debugTimer >= getgenv().DriveDebugInterval then
+                debugTimer = 0
+                -- Zähle noch vorhandene BodyVelocity (inkl. unserers)
+                local bvCount = 0
+                for _, inst in ipairs(primary:GetDescendants()) do
+                    if inst:IsA("BodyVelocity") then bvCount = bvCount + 1 end
+                end
+                print(string.format(
+                    "[LostHub DEBUG] Throttle=%s | accelPressed=%s | forwardSpeed=%.2f | BVcount=%d | myBVParent=%s",
+                    tostring(seat and seat.Throttle or "nil"),
+                    tostring(accelPressed),
+                    forwardSpeed,
+                    bvCount,
+                    tostring(myBV.Parent and myBV.Parent:GetFullName() or "nil")
+                ))
+            end
+        end
     end)
+else
+    warn("[LostHub] Wrong Key, Find key in discord!")
+end    end)
 else
     warn("[LostHub] Wrong Key, Find key in discord!")
 end
